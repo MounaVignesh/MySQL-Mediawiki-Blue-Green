@@ -1,0 +1,169 @@
+- hosts: mysql*
+  name: Creates directoriess for mysql installation
+  file:
+    path: "{{ item }}"
+    state: directory
+    mode: 0755
+  with_items:
+    - "{{MYSQL_PATH}}"
+    - "{{DUMP_PATH}}"
+    - "{{MYSQL_SYMLINK_PATH}}"
+
+- hosts: mysql*
+  name: copy pem key all server
+  copy:
+    src: "{{ item }}"
+    dest: "/home/ec2-user/"
+    mode: 0600
+  with_items:
+     - "{{PEM_KEY}}"
+
+- hosts: mysql*
+  name: enable ec2-user permission for dump path
+  shell: chown -R ec2-user:ec2-user {{DUMP_PATH}}
+
+- hosts: mysql*
+  name: check mysql status
+  shell: ps -ef | grep mysql | grep -v grep | wc -l
+  ignore_errors: yes
+  register: status_mysql
+
+- hosts: mysql*
+  name: check mysql package is installed already
+  shell: "rpm -q {{MYSQL_PACKAGE_NAME}} | grep -v 'not installed' | wc -l"
+  ignore_errors: yes
+  register: mysql_package
+
+- hosts: mysql*
+  name: download sources
+  get_url:
+    url: "{{MYSQL_DOWNLOAD}}"
+    dest: "{{MYSQL_PATH}}"
+#  when: inventory_hostname in groups['mysql_master'] or inventory_hostname in groups['mysql_slave'] and {{ status_mysql.stdout }} == 0
+  when: "{{ status_mysql.stdout }} == 0"
+
+- hosts: mysql*
+  name: Extract archive
+  shell: rpm -ivh {{MYSQL_PATH}}/{{MYSQL_RPM_FILE}}
+#  when: inventory_hostname in groups['mysql_master'] or inventory_hostname in groups['mysql_slave'] and {{ status_mysql.stdout }} == 0 and {{ mysql_package.stdout }} == 0
+  when: "{{ status_mysql.stdout }} == 0 and {{ mysql_package.stdout }} == 0"
+
+- hosts: mysql*
+  name: install mysql
+  shell: "yum install mysql-community-server -y"
+#  when: inventory_hostname in groups['mysql_master'] or inventory_hostname in groups['mysql_slave'] and {{ status_mysql.stdout }} == 0
+  when: "{{ status_mysql.stdout }} == 0"
+
+- hosts: mysql*
+  name: copy scripts
+  copy:
+    src: "{{ item }}"
+    dest: "{{MYSQL_CONF_PATH}}/"
+    mode: 0755
+  with_fileglob:
+     - "{{MYSQL_CONF_FILE_LOCAL_PATH}}/*"
+#  when: inventory_hostname in groups['mysql_master'] or inventory_hostname in groups['mysql_slave'] and {{ status_mysql.stdout }} == 0
+  when: "{{ status_mysql.stdout }} == 0"
+
+- hosts: mysql*
+  name: start mysql services
+  shell: service mysqld start
+  when: "{{ status_mysql.stdout }} == 0"
+
+- hosts: mysql*
+  name: Take temp password from all mysql nodes
+  shell: "awk -F ': ' '$0 ~ \"temporary password\"{print $2}' /var/log/mysqld.log"
+  register: temp_password
+  when: "{{ status_mysql.stdout }} == 0"
+
+- hosts: mysql*
+  name: Check for password is already set
+  shell: "mysql -u root -p{{ROOT_PASSWORD}} -e 'show databases;' | wc -l"
+  register: check_password
+  when: "{{ status_mysql.stdout }} == 0"
+
+- hosts: mysql*
+  name : Set root password
+  shell: "sudo mysql -uroot -p'{{item}}' --connect-expired-password -e \"ALTER USER 'root'@'localhost' IDENTIFIED BY '{{ROOT_PASSWORD}}';\""
+  with_items:
+    - "{{temp_password.stdout_lines}}"
+  when: "{{ check_password.stdout }} == 0"
+
+- hosts: mysql*
+  name: stop mysql services
+  shell: service mysqld stop
+  when: "{{ status_mysql.stdout }} == 0"
+
+- hosts: mysql*
+  name: check mysql current status
+  shell: service mysqld status | grep 'active (running)' | wc -l
+  ignore_errors: yes
+  register: current_mysql_status
+
+
+- hosts: mysql*
+  name: Creating Symlink for mysql
+  shell: "{{item}}"
+  with_items:
+    - "mv /var/lib/mysql {{MYSQL_SYMLINK_PATH}}/"
+    - "ln -s {{MYSQL_SYMLINK_PATH}}/mysql /var/lib/mysql"
+  when: "{{ current_mysql_status.stdout }} == 0"
+
+
+
+- hosts: mysql*
+  name: Coping the my.cnf configuration files into master
+  shell: "{{item}}"
+  with_items:
+    - "/bin/cp {{MYSQL_CONF_PATH}}/my.cnf-master {{MYSQL_CONF_PATH}}/my.cnf"
+  when: inventory_hostname in groups['mysql_master'] and {{ current_mysql_status.stdout }} == 0
+
+- hosts: mysql*
+  name: Coping the my.cnf configuration files into slave
+  shell: "{{item}}"
+  with_items:
+   - "/bin/cp {{MYSQL_CONF_PATH}}/my.cnf-slave {{MYSQL_CONF_PATH}}/my.cnf"
+  when: inventory_hostname in groups['mysql_slave'] and {{ current_mysql_status.stdout }} == 0
+
+- hosts: mysql*
+  name: replace variables in master my.cnf
+  gather_facts: no
+  replace:
+   dest: "{{ item.dest }}"
+   regexp: "{{ item.regexp1 }}"
+   replace: "{{ item.replace }}"
+  with_items:
+    - { dest: '{{MYSQL_CONF_PATH}}/my.cnf', regexp1: 'server-id.*', replace: 'server-id={{ groups.mysql_master.index(inventory_hostname) + 1 }}'}
+  when: inventory_hostname in groups['mysql_master'] and {{ current_mysql_status.stdout }} == 0
+
+- hosts: mysql*
+  name: replace variables in slave my.cnf
+  gather_facts: no
+  replace:
+   dest: "{{ item.dest }}"
+   regexp: "{{ item.regexp1 }}"
+   replace: "{{ item.replace }}"
+  with_items:
+    - { dest: '{{MYSQL_CONF_PATH}}/my.cnf', regexp1: 'server-id.*', replace: 'server-id={{ groups.mysql_slave.index(inventory_hostname) + 3 }}'}
+  when: inventory_hostname in groups['mysql_slave'] and {{ current_mysql_status.stdout }} == 0
+
+- hosts: mysql*
+  name: start mysql services
+  shell: service mysqld start
+  when: "{{ current_mysql_status.stdout }} == 0"
+
+- hosts: mysql*
+  name: Check for temp database replicadb
+  shell: "yum install MySQL-python -y"
+
+- hosts: mysql*
+  name: Install Apache and Php
+  shell: "yum install httpd php php-mysql php-gd php-xml mysql-server mysql -y"
+  
+- hosts: mysql*
+  name: Autostart Apache and MySQL
+  shell: "chkconfig httpd on && chkconfig Mysqld on"  
+  
+- hosts: mysql*
+  name: Install MediaWiki
+  shell: "cd /var/www/ && wget https://releases.wikimedia.org/mediawiki/{{WIKI_VERSION}}/{{WIKI_PACKAGE}}.tar.gz && tar -xczf {{WIKI_PACKAGE}}.tar.gz && mv {{WIKI_PACKAGE}}/* /var/www/"   

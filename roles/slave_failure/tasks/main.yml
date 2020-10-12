@@ -1,0 +1,8 @@
+- hosts: mysql_master
+  name: Check master status
+  shell: mysql -u root -p'{{ROOT_PASSWORD}}' -e "SHOW SLAVE STATUS \G;" | grep -E 'Slave_IO_Running:|Slave_SQL_Running:' | grep Yes | wc -l executable=/bin/bash
+  register: slave_status
+  when: inventory_hostname in groups.mysql_slave
+
+- name: Print slave status
+  debug: "msg='slave status: {{ slave_status }}'"

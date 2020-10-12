@@ -1,0 +1,8 @@
+# http://docs.ansible.com/ansible/playbooks_best_practices.html
+- name: Create Instances
+  hosts: mysql*
+  sudo: yes
+  ignore_errors: yes
+  roles:
+    - configure_mysql
+

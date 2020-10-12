@@ -1,0 +1,7 @@
+- name: Insert temp data on Master
+  hosts: mysql*
+  sudo: yes
+  ignore_errors: yes
+  roles:
+    - service_restart
+

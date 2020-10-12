@@ -1,0 +1,22 @@
+- hosts: mysql_slave
+  name: Check for temp database in slave server to enable replication
+  shell: "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"show databases;\" | grep replicadb | wc -l"
+  register: slave_temp_database
+  when: inventory_hostname == groups.mysql_slave[0]
+
+#- name: debug ciollections
+#  with_items:
+#    - "{{MASTER_STATUS}}"
+#  debug: "msg='status is: {{hostvars[groups.mysql_master[0]][master_status]}}'"
+#  debug: "msg='status is: {{hostvars[localhost][INITIAL_MASTER_FILE]}}'"
+
+- hosts: mysql_slave
+  name: Restore temp database on slave server to enable slave replication
+  shell: "{{item}}"
+  with_items:
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"stop slave;\""
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"reset slave;\""
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"create database replicadb;\""
+    - "/usr/bin/mysql -u root -p'{{ROOT_PASSWORD}}' replicadb < {{DUMP_PATH}}/temp_database_dump.sql"
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"START SLAVE;\""
+  when: inventory_hostname == groups.mysql_slave[0] and {{slave_temp_database.stdout}} == 0

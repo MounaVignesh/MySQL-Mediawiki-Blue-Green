@@ -1,0 +1,12 @@
+- name: Insert temp data on Master
+  hosts: mysql*
+  sudo: yes
+  ignore_errors: yes
+  roles:
+    - slave_failure
+
+#- name: Insert temp data on Master
+#  hosts: mysql_slave
+#  sudo: yes
+#  roles:
+#    - initial_data_insert_master

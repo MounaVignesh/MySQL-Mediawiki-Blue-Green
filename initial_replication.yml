@@ -1,0 +1,5 @@
+- name: Restore temp database to enable master-slave replication
+  hosts: mysql_slave
+  sudo: yes
+  roles:
+    - initial_master_slave_replica

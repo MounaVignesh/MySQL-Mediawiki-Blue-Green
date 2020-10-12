@@ -1,0 +1,207 @@
+- name: copy pem key all server
+  copy:
+    src: "{{ item }}"
+    dest: "/home/ec2-user/"
+    mode: 0600
+  with_items:
+     - "{{PEM_KEY}}"
+#  when: inventory_hostname in groups.mysql_master and inventory_hostname in groups.mysql_slave
+
+- hosts: mysql*
+  name: enable ec2-user permission for dump path
+  shell: chown -R ec2-user:ec2-user {{DUMP_PATH}}
+#  when: inventory_hostname in groups.mysql_master and inventory_hostname in groups.mysql_slave
+
+- hosts: mysql_master
+  name: Check for temp database replicadb
+  shell: "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"show databases;\" | grep replicadb | wc -l"
+  register: temp_database
+  when: inventory_hostname == groups.mysql_master[0]
+  
+- hosts: mysql_master
+  name: Create temp database for initial replication
+  shell: "{{item}}"
+  ignore_errors: yes
+  with_items:
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"create database replicadb;\""
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"CREATE TABLE replicadb.replica (LastName varchar(255),FirstName varchar(255));\""
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"INSERT INTO replicadb.replica (LastName, FirstName) VALUES ('replica1', 'replica2');\""
+  when: inventory_hostname == groups.mysql_master[0] and {{temp_database.stdout}} == 0
+
+- hosts: mysql_master
+  name: lock tables
+  shell: "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"FLUSH TABLES WITH READ LOCK;\""
+  when: inventory_hostname == groups.mysql_master[0]
+
+- name: get master status
+  mysql_replication:
+    mode: getmaster
+    login_user: root
+    login_password: "{{ROOT_PASSWORD}}"
+  register: master_status
+  when: inventory_hostname == groups.mysql_master[0]
+
+- name: set facts for master file name
+  set_fact:
+    INITIAL_MASTER_FILE: "{{master_status.File}}"
+
+- name: set facts for master position
+  set_fact:
+    INITIAL_MASTER_POSITION: "{{master_status.Position}}"
+
+- hosts: mysql_master
+  name: Take dump from master server
+  shell: /usr/bin/mysqldump -u root -p'{{ROOT_PASSWORD}}' -q -c --lock-all-tables replicadb > {{DUMP_PATH}}/temp_database_dump.sql
+  when: inventory_hostname == groups.mysql_master[0]
+
+- hosts: mysql_master
+  name: unlock tables
+  shell: "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"unlock tables;\""
+  when: inventory_hostname == groups.mysql_master[0]
+
+- hosts: mysql_master
+  name: scp dump file
+  shell: scp -i {{PEM_KEY}} -o StrictHostKeyChecking=no {{DUMP_PATH}}/temp_database_dump.sql ec2-user@{{item}}:{{DUMP_PATH}}
+  with_items:
+    - "{{groups.mysql_master[1]}}"
+    - "{{groups.mysql_slave[0]}}"
+  when: inventory_hostname == groups.mysql_master[0]
+
+- hosts: mysql_master
+  name: Provide grant access to master & slave replication
+  shell: "{{item}}"
+  with_items:
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"GRANT REPLICATION SLAVE ON *.* TO '{{MYSQL_SLAVE_REP_USERNAME}}'@'10.%' IDENTIFIED BY '{{MYSQL_SLAVE_REP_PASSWORD}}';\""
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"GRANT REPLICATION SLAVE ON *.* TO '{{MYSQL_MASTER_REP_USERNAME}}'@'10.%' IDENTIFIED BY '{{MYSQL_MASTER_REP_PASSWORD}}';\""
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"flush privileges;\""
+  when: inventory_hostname in groups.mysql_master
+
+- hosts: mysql_slave
+  name: Check for temp database in slave server to enable replication
+  shell: "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"show databases;\" | grep replicadb | wc -l"
+  register: slave_temp_database
+  when: inventory_hostname == groups.mysql_slave[0]
+
+- hosts: mysql_slave
+  name: Restore temp database on slave server to enable slave replication
+  shell: "{{item}}"
+  with_items:
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"stop slave;\""
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"reset slave;\""
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"create database replicadb;\""
+    - "/usr/bin/mysql -u root -p'{{ROOT_PASSWORD}}' replicadb < {{DUMP_PATH}}/temp_database_dump.sql"
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"CHANGE MASTER TO MASTER_HOST='{{groups.mysql_master[0]}}', MASTER_USER='{{MYSQL_SLAVE_REP_USERNAME}}', MASTER_PASSWORD='{{MYSQL_SLAVE_REP_PASSWORD}}', MASTER_LOG_FILE='{{hostvars[groups['mysql_master'][0]]['INITIAL_MASTER_FILE']}}', MASTER_LOG_POS={{hostvars[groups['mysql_master'][0]]['INITIAL_MASTER_POSITION']}};\""
+  #  - echo "{{hostvars[groups['mysql_master'][0]]['initial_change_master_position']['stdout']}}  "
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"START SLAVE;\""
+  when: inventory_hostname == groups.mysql_slave[0] and {{slave_temp_database.stdout}} == 0
+
+- hosts: mysql_master
+  name: Check for temp database in master 2 server to enable master-msater replication
+  shell: "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"show databases;\" | grep replicadb | wc -l"
+  register: master_temp_database
+  when: inventory_hostname == groups.mysql_master[1]
+
+- hosts: mysql_master
+  name: Restore temp database on master 2 server to enable master-master replication
+  shell: "{{item}}"
+  with_items:
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"stop slave;\""
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"reset slave;\""
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"create database replicadb;\""
+    - "/usr/bin/mysql -u root -p'{{ROOT_PASSWORD}}' replicadb < {{DUMP_PATH}}/temp_database_dump.sql"
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"CHANGE MASTER TO MASTER_HOST='{{groups.mysql_master[0]}}', MASTER_USER='{{MYSQL_MASTER_REP_USERNAME}}', MASTER_PASSWORD='{{MYSQL_MASTER_REP_PASSWORD}}', MASTER_LOG_FILE='{{hostvars[groups['mysql_master'][0]]['INITIAL_MASTER_FILE']}}', MASTER_LOG_POS={{hostvars[groups['mysql_master'][0]]['INITIAL_MASTER_POSITION']}};\""
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"START SLAVE;\""
+  when: inventory_hostname == groups.mysql_master[1] and {{master_temp_database.stdout}} == 0
+
+- hosts: mysql_master
+  name: get master 2 status
+  mysql_replication:
+    mode: getmaster
+    login_user: root
+    login_password: "{{ROOT_PASSWORD}}"
+  register: master_2_status
+  when: inventory_hostname == groups.mysql_master[1]
+
+- name: set facts for master 2 file name
+  set_fact:
+    INITIAL_MASTER_2_FILE: "{{master_2_status.File}}"
+
+- name: set facts for master 2 position
+  set_fact:
+    INITIAL_MASTER_2_POSITION: "{{master_2_status.Position}}"
+
+- hosts: mysql_master
+  name: Check for temp database in master 2 server to enable master-msater replication
+  shell: "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"show databases;\" | grep replicadb | wc -l"
+  register: master_temp_database
+  when: inventory_hostname == groups.mysql_master[0]
+
+- hosts: mysql_master
+  name: Change master position on master 1 server to enable bi-directional master-master replication
+  shell: "{{item}}"
+  with_items:
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"stop slave;\""
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"reset slave;\""
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"CHANGE MASTER TO MASTER_HOST='{{groups.mysql_master[1]}}', MASTER_USER='{{MYSQL_MASTER_REP_USERNAME}}', MASTER_PASSWORD='{{MYSQL_MASTER_REP_PASSWORD}}', MASTER_LOG_FILE='{{hostvars[groups['mysql_master'][1]]['INITIAL_MASTER_2_FILE']}}', MASTER_LOG_POS={{hostvars[groups['mysql_master'][1]]['INITIAL_MASTER_2_POSITION']}};\""
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"START SLAVE;\""
+  when: inventory_hostname == groups.mysql_master[0]
+
+- hosts: mysql_master
+  name: lock tables
+  shell: "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"FLUSH TABLES WITH READ LOCK;\""
+  when: inventory_hostname == groups.mysql_master[1]
+
+- name: get master status
+  mysql_replication:
+    mode: getmaster
+    login_user: root
+    login_password: "{{ROOT_PASSWORD}}"
+  register: master_2_status_replication
+  when: inventory_hostname == groups.mysql_master[1]
+
+- hosts: mysql_master
+  name: set facts for master file name
+  set_fact:
+    INITIAL_MASTER_2_SLAVE_FILE: "{{master_2_status_replication.File}}"
+  when: inventory_hostname == groups.mysql_master[1]
+
+- hosts: mysql_master
+  name: set facts for master position
+  set_fact:
+    INITIAL_MASTER_2_SLAVE_POSITION: "{{master_2_status_replication.Position}}"
+  when: inventory_hostname == groups.mysql_master[1]
+
+- hosts: mysql_master
+  name: Take dump from master server
+  shell: /usr/bin/mysqldump -u root -p'{{ROOT_PASSWORD}}' -q -c --lock-all-tables replicadb > {{DUMP_PATH}}/temp_database_dump.sql
+  when: inventory_hostname == groups.mysql_master[1]
+
+- hosts: mysql_master
+  name: unlock tables
+  shell: "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"unlock tables;\""
+  when: inventory_hostname == groups.mysql_master[1]
+
+- hosts: mysql_master
+  name: scp dump file
+  shell: scp -i {{PEM_KEY}} -o StrictHostKeyChecking=no {{DUMP_PATH}}/temp_database_dump.sql ec2-user@{{item}}:{{DUMP_PATH}}
+  with_items:
+    - "{{groups.mysql_slave[1]}}"
+  when: inventory_hostname == groups.mysql_master[1]
+
+- hosts: mysql_slave
+  name: Check for temp database in slave server to enable replication
+  shell: "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"show databases;\" | grep replicadb | wc -l"
+  register: slave_2_temp_database
+  when: inventory_hostname == groups.mysql_slave[1]
+
+- hosts: mysql_slave
+  name: Restore temp database on slave server to enable slave replication
+  shell: "{{item}}"
+  with_items:
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"stop slave;\""
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"reset slave;\""
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"create database replicadb;\""
+    - "/usr/bin/mysql -u root -p'{{ROOT_PASSWORD}}' replicadb < {{DUMP_PATH}}/temp_database_dump.sql"
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"CHANGE MASTER TO MASTER_HOST='{{groups.mysql_master[1]}}', MASTER_USER='{{MYSQL_SLAVE_REP_USERNAME}}', MASTER_PASSWORD='{{MYSQL_SLAVE_REP_PASSWORD}}', MASTER_LOG_FILE='{{hostvars[groups['mysql_master'][1]]['INITIAL_MASTER_2_SLAVE_FILE']}}', MASTER_LOG_POS={{hostvars[groups['mysql_master'][1]]['INITIAL_MASTER_2_SLAVE_POSITION']}};\""
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"START SLAVE;\""
+  when: inventory_hostname == groups.mysql_slave[1] and {{slave_2_temp_database.stdout}} == 0

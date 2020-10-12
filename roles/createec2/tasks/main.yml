@@ -1,0 +1,3 @@
+- include: createone.yml
+  with_items:
+    "{{INSTANCES}}"

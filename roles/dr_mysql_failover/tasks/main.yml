@@ -1,0 +1,669 @@
+#### Master 1 replication failure
+- hosts: mysql_master
+  name: Check Master-Master replication Slave_IO_Running status on Master2
+  shell: mysql -u root -p'{{ROOT_PASSWORD}}' -e "show slave status\G" | grep 'Slave_IO_Running' | grep 'Yes' | wc -l executable=/bin/bash
+  register: master2_slave_io_status
+  when: inventory_hostname == groups.mysql_master[1]
+
+- hosts: mysql_master
+  name: Check Master-Master replication Last_IO_Error status on Master2
+  shell: mysql -u root -p'{{ROOT_PASSWORD}}' -e "show slave status\G" | grep 'Last_IO_Error' | grep 'error' | wc -l executable=/bin/bash
+  register: master2_last_io_error_status
+  when: inventory_hostname == groups.mysql_master[1]
+
+- hosts: mysql_master
+  name: Get the databases available in Master2
+  shell: mysql -u root -p'{{ROOT_PASSWORD}}' -e "show databases;" | grep -v 'information_schema\|mysql\|Database\|performance_schema\|sys'
+  register: master2_databases
+  when: inventory_hostname == groups.mysql_master[1]
+
+- hosts: mysql_master
+  name: Check for temp database replicadb
+  shell: "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"show databases;\" | grep {{item}} | wc -l"
+  register: temp_database
+  with_items:
+    - "{{hostvars[groups['mysql_master'][1]]['master2_databases']['stdout_lines']}}"
+  when: inventory_hostname == groups.mysql_master[0]
+
+- hosts: mysql_master
+  name: lock tables
+  shell: "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"FLUSH TABLES WITH READ LOCK;\""
+  when: inventory_hostname == groups.mysql_master[1] and {{master2_slave_io_status.stdout}} == 0 and {{master2_last_io_error_status.stdout}} == 1
+
+- hosts: mysql_master
+  name: get master status from master 2
+  mysql_replication:
+    mode: getmaster
+    login_user: root
+    login_password: "{{ROOT_PASSWORD}}"
+  register: master2_status
+  when: inventory_hostname == groups.mysql_master[1] and {{master2_slave_io_status.stdout}} == 0 and {{master2_last_io_error_status.stdout}} == 1
+
+- hosts: mysql_master
+  name: set facts for master file name
+  set_fact:
+    INITIAL_MASTER_FILE: "{{master2_status.File}}"
+  when: inventory_hostname == groups.mysql_master[1] and {{master2_slave_io_status.stdout}} == 0 and {{master2_last_io_error_status.stdout}} == 1
+
+- hosts: mysql_master
+  name: set facts for master position
+  set_fact:
+    INITIAL_MASTER_POSITION: "{{master2_status.Position}}"
+  when: inventory_hostname == groups.mysql_master[1] and {{master2_slave_io_status.stdout}} == 0 and {{master2_last_io_error_status.stdout}} == 1
+
+- hosts: mysql_master
+  name: Take full dump from master2 server
+  shell: /usr/bin/mysqldump -u root -p'{{ROOT_PASSWORD}}' -q -c --lock-all-tables {{item}} > {{DUMP_PATH}}/{{item}}_dump.sql
+  with_items:
+    - "{{master2_databases.stdout_lines}}"
+  when: inventory_hostname == groups.mysql_master[1] and {{master2_slave_io_status.stdout}} == 0 and {{master2_last_io_error_status.stdout}} == 1
+
+- hosts: mysql_master
+  name: unlock tables on master2
+  shell: "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"unlock tables;\""
+  when: inventory_hostname == groups.mysql_master[1] and {{master2_slave_io_status.stdout}} == 0 and {{master2_last_io_error_status.stdout}} == 1
+
+- hosts: mysql_master
+  name: scp dump file
+  shell: scp -i {{PEM_KEY}} -o StrictHostKeyChecking=no {{DUMP_PATH}}/*.sql ec2-user@{{item}}:{{DUMP_PATH}}
+  with_items:
+    - "{{groups.mysql_master[0]}}"
+  when: inventory_hostname == groups.mysql_master[1] and {{master2_slave_io_status.stdout}} == 0 and {{master2_last_io_error_status.stdout}} == 1
+
+- hosts: mysql_master
+  name: Provide grant access to master & slave replication
+  shell: "{{item}}"
+  with_items:
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"GRANT REPLICATION SLAVE ON *.* TO '{{MYSQL_SLAVE_REP_USERNAME}}'@'10.%' IDENTIFIED BY '{{MYSQL_SLAVE_REP_PASSWORD}}';\""
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"GRANT REPLICATION SLAVE ON *.* TO '{{MYSQL_MASTER_REP_USERNAME}}'@'10.%' IDENTIFIED BY '{{MYSQL_MASTER_REP_PASSWORD}}';\""
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"flush privileges;\""
+  when: inventory_hostname in groups.mysql_master
+
+- hosts: mysql_master
+  name: Stop and reset slave on master1 server to enable Master-Master replication
+  shell: "{{item}}"
+  with_items:
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"stop slave;\""
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"reset slave;\""
+  when: inventory_hostname == groups.mysql_master[0] and {{hostvars[groups['mysql_master'][1]]['master2_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_master'][1]]['master2_last_io_error_status']['stdout']}} == 1
+
+- hosts: mysql_master
+  name: Create database on master1
+  shell: "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"create database {{item}};\""
+  with_items:
+    - "{{hostvars[groups['mysql_master'][1]]['master2_databases']['stdout_lines']}}"
+  when: inventory_hostname == groups.mysql_master[0] and {{hostvars[groups['mysql_master'][1]]['master2_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_master'][1]]['master2_last_io_error_status']['stdout']}} == 1
+
+- hosts: mysql_master
+  name: Restore full database on master1 server to enable Master-Master replication
+  shell: "/usr/bin/mysql -u root -p'{{ROOT_PASSWORD}}' {{item}} < {{DUMP_PATH}}/{{item}}_dump.sql"
+  with_items:
+    - "{{hostvars[groups['mysql_master'][1]]['master2_databases']['stdout_lines']}}"
+  when: inventory_hostname == groups.mysql_master[0] and {{hostvars[groups['mysql_master'][1]]['master2_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_master'][1]]['master2_last_io_error_status']['stdout']}} == 1
+
+- hosts: mysql_master
+  name: Change master postion on master1 server to enable Master-Master replication
+  shell: "{{item}}"
+  with_items:
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"CHANGE MASTER TO MASTER_HOST='{{groups.mysql_master[1]}}', MASTER_USER='{{MYSQL_MASTER_REP_USERNAME}}', MASTER_PASSWORD='{{MYSQL_MASTER_REP_PASSWORD}}', MASTER_LOG_FILE='{{hostvars[groups['mysql_master'][1]]['INITIAL_MASTER_FILE']}}', MASTER_LOG_POS={{hostvars[groups['mysql_master'][1]]['INITIAL_MASTER_POSITION']}};\""
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"START SLAVE;\""
+  when: inventory_hostname == groups.mysql_master[0] and {{hostvars[groups['mysql_master'][1]]['master2_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_master'][1]]['master2_last_io_error_status']['stdout']}} == 1
+
+- hosts: mysql_master
+  name: get master 1 status
+  mysql_replication:
+    mode: getmaster
+    login_user: root
+    login_password: "{{ROOT_PASSWORD}}"
+  register: master1_status
+  when: inventory_hostname == groups.mysql_master[0] and {{hostvars[groups['mysql_master'][1]]['master2_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_master'][1]]['master2_last_io_error_status']['stdout']}} == 1
+
+- hosts: mysql_master
+  name: set facts for master 1 file name
+  set_fact:
+    INITIAL_MASTER_1_FILE: "{{master1_status.File}}"
+  when: inventory_hostname == groups.mysql_master[0] and {{hostvars[groups['mysql_master'][1]]['master2_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_master'][1]]['master2_last_io_error_status']['stdout']}} == 1
+
+- hosts: mysql_master
+  name: set facts for master 1 position
+  set_fact:
+    INITIAL_MASTER_1_POSITION: "{{master1_status.Position}}"
+  when: inventory_hostname == groups.mysql_master[0] and {{hostvars[groups['mysql_master'][1]]['master2_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_master'][1]]['master2_last_io_error_status']['stdout']}} == 1
+
+- hosts: mysql_master
+  name: Change master position on master 2 server to enable bi-directional master-master replication
+  shell: "{{item}}"
+  with_items:
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"stop slave;\""
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"reset slave;\""
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"CHANGE MASTER TO MASTER_HOST='{{groups.mysql_master[0]}}', MASTER_USER='{{MYSQL_MASTER_REP_USERNAME}}', MASTER_PASSWORD='{{MYSQL_MASTER_REP_PASSWORD}}', MASTER_LOG_FILE='{{hostvars[groups['mysql_master'][0]]['INITIAL_MASTER_1_FILE']}}', MASTER_LOG_POS={{hostvars[groups['mysql_master'][0]]['INITIAL_MASTER_1_POSITION']}};\""
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"START SLAVE;\""
+  when: inventory_hostname == groups.mysql_master[1] and {{master2_slave_io_status.stdout}} == 0 and {{master2_last_io_error_status.stdout}} == 1
+
+- hosts: mysql_master
+  name: "Delete dump files from master servers"
+  shell: "rm -rf {{DUMP_PATH}}/*.sql"
+  when: inventory_hostname in groups.mysql_master
+
+- hosts: mysql_master
+  name: lock tables
+  shell: "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"FLUSH TABLES WITH READ LOCK;\""
+  when: inventory_hostname == groups.mysql_master[0] and {{hostvars[groups['mysql_master'][1]]['master2_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_master'][1]]['master2_last_io_error_status']['stdout']}} == 1
+
+- name: get master status
+  mysql_replication:
+    mode: getmaster
+    login_user: root
+    login_password: "{{ROOT_PASSWORD}}"
+  register: master_1_status_replication
+  when: inventory_hostname == groups.mysql_master[0] and {{hostvars[groups['mysql_master'][1]]['master2_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_master'][1]]['master2_last_io_error_status']['stdout']}} == 1
+
+- hosts: mysql_master
+  name: set facts for master file name
+  set_fact:
+    INITIAL_MASTER_1_SLAVE_FILE: "{{master_1_status_replication.File}}"
+  when: inventory_hostname == groups.mysql_master[0] and {{hostvars[groups['mysql_master'][1]]['master2_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_master'][1]]['master2_last_io_error_status']['stdout']}} == 1
+
+- hosts: mysql_master
+  name: set facts for master position
+  set_fact:
+    INITIAL_MASTER_1_SLAVE_POSITION: "{{master_1_status_replication.Position}}"
+  when: inventory_hostname == groups.mysql_master[0] and {{hostvars[groups['mysql_master'][1]]['master2_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_master'][1]]['master2_last_io_error_status']['stdout']}} == 1
+
+- hosts: mysql_master
+  name: Take dump from master server
+  shell: /usr/bin/mysqldump -u root -p'{{ROOT_PASSWORD}}' -q -c --lock-all-tables {{item}} > {{DUMP_PATH}}/{{item}}_dump.sql
+  with_items:
+    - "{{hostvars[groups['mysql_master'][1]]['master2_databases']['stdout_lines']}}"
+  when: inventory_hostname == groups.mysql_master[0] and {{hostvars[groups['mysql_master'][1]]['master2_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_master'][1]]['master2_last_io_error_status']['stdout']}} == 1
+
+- hosts: mysql_master
+  name: unlock tables
+  shell: "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"unlock tables;\""
+  when: inventory_hostname == groups.mysql_master[0] and {{hostvars[groups['mysql_master'][1]]['master2_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_master'][1]]['master2_last_io_error_status']['stdout']}} == 1
+
+- hosts: mysql_master
+  name: scp dump file
+  shell: scp -i {{PEM_KEY}} -o StrictHostKeyChecking=no {{DUMP_PATH}}/*.sql ec2-user@{{item}}:{{DUMP_PATH}}
+  with_items:
+    - "{{groups.mysql_slave[0]}}"
+  when: inventory_hostname == groups.mysql_master[0] and {{hostvars[groups['mysql_master'][1]]['master2_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_master'][1]]['master2_last_io_error_status']['stdout']}} == 1
+
+- hosts: mysql_slave
+  name: Stop and reset slave to enable slave replication
+  shell: "{{item}}"
+  with_items:
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"stop slave;\""
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"reset slave;\""
+  when: inventory_hostname == groups.mysql_slave[0] and {{hostvars[groups['mysql_master'][1]]['master2_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_master'][1]]['master2_last_io_error_status']['stdout']}} == 1
+
+- hosts: mysql_slave
+  name: Drop database on slave1
+  shell: "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"drop database {{item}};\""
+  with_items:
+    - "{{hostvars[groups['mysql_master'][1]]['master2_databases']['stdout_lines']}}"
+  when: inventory_hostname == groups.mysql_slave[0] and {{hostvars[groups['mysql_master'][1]]['master2_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_master'][1]]['master2_last_io_error_status']['stdout']}} == 1
+
+- hosts: mysql_slave
+  name: Create database on slave1
+  shell: "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"create database {{item}};\""
+  with_items:
+    - "{{hostvars[groups['mysql_master'][1]]['master2_databases']['stdout_lines']}}"
+  when: inventory_hostname == groups.mysql_slave[0] and {{hostvars[groups['mysql_master'][1]]['master2_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_master'][1]]['master2_last_io_error_status']['stdout']}} == 1
+
+- hosts: mysql_slave
+  name: Restore full database on slave1 server to enable Master-Slave replication
+  shell: "/usr/bin/mysql -u root -p'{{ROOT_PASSWORD}}' {{item}} < {{DUMP_PATH}}/{{item}}_dump.sql"
+  with_items:
+    - "{{hostvars[groups['mysql_master'][1]]['master2_databases']['stdout_lines']}}"
+  when: inventory_hostname == groups.mysql_slave[0] and {{hostvars[groups['mysql_master'][1]]['master2_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_master'][1]]['master2_last_io_error_status']['stdout']}} == 1
+
+- hosts: mysql_slave
+  name: Change master postion on slave1 server to enable Master-Slave replication
+  shell: "{{item}}"
+  with_items:
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"CHANGE MASTER TO MASTER_HOST='{{groups.mysql_master[0]}}', MASTER_USER='{{MYSQL_SLAVE_REP_USERNAME}}', MASTER_PASSWORD='{{MYSQL_SLAVE_REP_PASSWORD}}', MASTER_LOG_FILE='{{hostvars[groups['mysql_master'][0]]['INITIAL_MASTER_1_SLAVE_FILE']}}', MASTER_LOG_POS={{hostvars[groups['mysql_master'][0]]['INITIAL_MASTER_1_SLAVE_POSITION']}};\""
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"START SLAVE;\""
+  when: inventory_hostname == groups.mysql_slave[0] and {{hostvars[groups['mysql_master'][1]]['master2_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_master'][1]]['master2_last_io_error_status']['stdout']}} == 1
+
+- hosts: mysql*
+  name: "Delete dump files from master servers"
+  shell: "rm -rf {{DUMP_PATH}}/*.sql"
+#  when: inventory_hostname in groups.mysql_master
+
+### Slave 1 replication failure
+- hosts: mysql_slave
+  name: Check Master1-Slave1 replication Slave_IO_Running status on Slave1
+  shell: mysql -u root -p'{{ROOT_PASSWORD}}' -e "show slave status\G" | grep 'Slave_IO_Running' | grep 'Yes' | wc -l executable=/bin/bash
+  register: slave1_slave_io_status
+  when: inventory_hostname == groups.mysql_slave[0]
+
+- hosts: mysql_slave
+  name: Check Master1-Slave1 replication Slave_SQL_Running status on Slave1
+  shell: mysql -u root -p'{{ROOT_PASSWORD}}' -e "show slave status\G" | grep 'Slave_SQL_Running' | grep 'Yes' | wc -l executable=/bin/bash
+  register: slave1_slave_sql_running_status
+  when: inventory_hostname == groups.mysql_slave[0]
+
+- hosts: mysql_master
+  name: Get the databases available in Master1
+  shell: mysql -u root -p'{{ROOT_PASSWORD}}' -e "show databases;" | grep -v 'information_schema\|mysql\|Database\|performance_schema\|sys'
+  register: master1_databases
+  when: inventory_hostname == groups.mysql_master[0]
+
+- hosts: mysql_master
+  name: lock tables
+  shell: "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"FLUSH TABLES WITH READ LOCK;\""
+  when: inventory_hostname == groups.mysql_master[0] and {{hostvars[groups['mysql_slave'][0]]['slave1_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_slave'][0]]['slave1_slave_sql_running_status']['stdout']}} == 0 
+
+- hosts: mysql_master
+  name: get master status from master 1
+  mysql_replication:
+    mode: getmaster
+    login_user: root
+    login_password: "{{ROOT_PASSWORD}}"
+  register: master_1_status
+  when: inventory_hostname == groups.mysql_master[0] and {{hostvars[groups['mysql_slave'][0]]['slave1_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_slave'][0]]['slave1_slave_sql_running_status']['stdout']}} == 0 
+
+- hosts: mysql_master
+  name: set facts for master 1 file name
+  set_fact:
+    INITIAL_MASTER1_SLAVE_FILE: "{{master_1_status.File}}"
+  when: inventory_hostname == groups.mysql_master[0] and {{hostvars[groups['mysql_slave'][0]]['slave1_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_slave'][0]]['slave1_slave_sql_running_status']['stdout']}} == 0 
+
+- hosts: mysql_master
+  name: set facts for master 1 position
+  set_fact:
+    INITIAL_MASTER1_SLAVE_POSITION: "{{master_1_status.Position}}"
+  when: inventory_hostname == groups.mysql_master[0] and {{hostvars[groups['mysql_slave'][0]]['slave1_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_slave'][0]]['slave1_slave_sql_running_status']['stdout']}} == 0 
+
+- hosts: mysql_master
+  name: Take full dump from master1 server
+  shell: /usr/bin/mysqldump -u root -p'{{ROOT_PASSWORD}}' -q -c --lock-all-tables {{item}} > {{DUMP_PATH}}/{{item}}_dump.sql
+  with_items:
+    - "{{master1_databases.stdout_lines}}"
+  when: inventory_hostname == groups.mysql_master[0] and {{hostvars[groups['mysql_slave'][0]]['slave1_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_slave'][0]]['slave1_slave_sql_running_status']['stdout']}} == 0 
+
+- hosts: mysql_master
+  name: unlock tables on master1
+  shell: "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"unlock tables;\""
+  when: inventory_hostname == groups.mysql_master[0] and {{hostvars[groups['mysql_slave'][0]]['slave1_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_slave'][0]]['slave1_slave_sql_running_status']['stdout']}} == 0 
+
+- hosts: mysql_master
+  name: scp dump file
+  shell: scp -i {{PEM_KEY}} -o StrictHostKeyChecking=no {{DUMP_PATH}}/*.sql ec2-user@{{item}}:{{DUMP_PATH}}
+  with_items:
+    - "{{groups.mysql_slave[0]}}"
+  when: inventory_hostname == groups.mysql_master[0] and {{hostvars[groups['mysql_slave'][0]]['slave1_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_slave'][0]]['slave1_slave_sql_running_status']['stdout']}} == 0 
+
+- hosts: mysql_slave
+  name: Stop and reset slave to enable slave replication
+  shell: "{{item}}"
+  with_items:
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"stop slave;\""
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"reset slave;\""
+  when: inventory_hostname == groups.mysql_slave[0] and {{slave1_slave_io_status.stdout}} == 0 and {{slave1_slave_sql_running_status.stdout}} == 0
+
+- hosts: mysql_slave
+  name: Drop database on slave1
+  shell: "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"drop database {{item}};\""
+  with_items:
+    - "{{hostvars[groups['mysql_master'][0]]['master1_databases']['stdout_lines']}}"
+  when: inventory_hostname == groups.mysql_slave[0] and {{slave1_slave_io_status.stdout}} == 0 and {{slave1_slave_sql_running_status.stdout}} == 0
+
+- hosts: mysql_slave
+  name: Create database on slave1
+  shell: "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"create database {{item}};\""
+  with_items:
+    - "{{hostvars[groups['mysql_master'][0]]['master1_databases']['stdout_lines']}}"
+  when: inventory_hostname == groups.mysql_slave[0] and {{slave1_slave_io_status.stdout}} == 0 and {{slave1_slave_sql_running_status.stdout}} == 0
+
+- hosts: mysql_slave
+  name: Restore full database on slave1 server to enable Master-Slave replication
+  shell: "/usr/bin/mysql -u root -p'{{ROOT_PASSWORD}}' {{item}} < {{DUMP_PATH}}/{{item}}_dump.sql"
+  with_items:
+    - "{{hostvars[groups['mysql_master'][0]]['master1_databases']['stdout_lines']}}"
+  when: inventory_hostname == groups.mysql_slave[0] and {{slave1_slave_io_status.stdout}} == 0 and {{slave1_slave_sql_running_status.stdout}} == 0
+
+- hosts: mysql_slave
+  name: Change master postion on slave1 server to enable Master-slave replication
+  shell: "{{item}}"
+  with_items:
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"CHANGE MASTER TO MASTER_HOST='{{groups.mysql_master[0]}}', MASTER_USER='{{MYSQL_SLAVE_REP_USERNAME}}', MASTER_PASSWORD='{{MYSQL_SLAVE_REP_PASSWORD}}', MASTER_LOG_FILE='{{hostvars[groups['mysql_master'][0]]['INITIAL_MASTER1_SLAVE_FILE']}}', MASTER_LOG_POS={{hostvars[groups['mysql_master'][0]]['INITIAL_MASTER1_SLAVE_POSITION']}};\""
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"START SLAVE;\""
+  when: inventory_hostname == groups.mysql_slave[0] and {{slave1_slave_io_status.stdout}} == 0 and {{slave1_slave_sql_running_status.stdout}} == 0
+
+- hosts: mysql*
+  name: "Delete dump files from master servers"
+  shell: "rm -rf {{DUMP_PATH}}/*.sql"
+#  when: inventory_hostname in groups.mysql_master
+
+#### Master 2 replication failure
+- hosts: mysql_master
+  name: Check Master-Master replication Slave_IO_Running status on Master1
+  shell: mysql -u root -p'{{ROOT_PASSWORD}}' -e "show slave status\G" | grep 'Slave_IO_Running' | grep 'Yes' | wc -l executable=/bin/bash
+  register: master1_slave_io_status
+  when: inventory_hostname == groups.mysql_master[0]
+
+- hosts: mysql_master
+  name: Check Master-Master replication Last_IO_Error status on Master1
+  shell: mysql -u root -p'{{ROOT_PASSWORD}}' -e "show slave status\G" | grep 'Last_IO_Error' | grep 'error' | wc -l executable=/bin/bash
+  register: master1_last_io_error_status
+  when: inventory_hostname == groups.mysql_master[0]
+
+- hosts: mysql_master
+  name: Get the databases available in Master1
+  shell: mysql -u root -p'{{ROOT_PASSWORD}}' -e "show databases;" | grep -v 'information_schema\|mysql\|Database\|performance_schema\|sys'
+  register: master_1_databases
+  when: inventory_hostname == groups.mysql_master[0]
+
+- hosts: mysql_master
+  name: lock tables
+  shell: "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"FLUSH TABLES WITH READ LOCK;\""
+  when: inventory_hostname == groups.mysql_master[0] and {{master1_slave_io_status.stdout}} == 0 and {{master1_last_io_error_status.stdout}} == 1
+
+- hosts: mysql_master
+  name: get master status from master 1
+  mysql_replication:
+    mode: getmaster
+    login_user: root
+    login_password: "{{ROOT_PASSWORD}}"
+  register: master_status
+  when: inventory_hostname == groups.mysql_master[0] and {{master1_slave_io_status.stdout}} == 0 and {{master1_last_io_error_status.stdout}} == 1
+
+- hosts: mysql_master
+  name: set facts for master file name
+  set_fact:
+    MASTER_ONE_FILE_NAME: "{{master_status.File}}"
+  when: inventory_hostname == groups.mysql_master[0] and {{master1_slave_io_status.stdout}} == 0 and {{master1_last_io_error_status.stdout}} == 1
+
+- hosts: mysql_master
+  name: set facts for master position
+  set_fact:
+    MASTER_ONE_FILE_POSITION: "{{master_status.Position}}"
+  when: inventory_hostname == groups.mysql_master[0] and {{master1_slave_io_status.stdout}} == 0 and {{master1_last_io_error_status.stdout}} == 1
+
+- hosts: mysql_master
+  name: Take full dump from master1 server
+  shell: /usr/bin/mysqldump -u root -p'{{ROOT_PASSWORD}}' -q -c --lock-all-tables {{item}} > {{DUMP_PATH}}/{{item}}_dump.sql
+  with_items:
+    - "{{master_1_databases.stdout_lines}}"
+  when: inventory_hostname == groups.mysql_master[0] and {{master1_slave_io_status.stdout}} == 0 and {{master1_last_io_error_status.stdout}} == 1
+
+- hosts: mysql_master
+  name: unlock tables on master1
+  shell: "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"unlock tables;\""
+  when: inventory_hostname == groups.mysql_master[0] and {{master1_slave_io_status.stdout}} == 0 and {{master1_last_io_error_status.stdout}} == 1
+
+- hosts: mysql_master
+  name: scp dump file
+  shell: scp -i {{PEM_KEY}} -o StrictHostKeyChecking=no {{DUMP_PATH}}/*.sql ec2-user@{{item}}:{{DUMP_PATH}}
+  with_items:
+    - "{{groups.mysql_master[1]}}"
+  when: inventory_hostname == groups.mysql_master[0] and {{master1_slave_io_status.stdout}} == 0 and {{master1_last_io_error_status.stdout}} == 1
+
+- hosts: mysql_master
+  name: Provide grant access to master & slave replication
+  shell: "{{item}}"
+  with_items:
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"GRANT REPLICATION SLAVE ON *.* TO '{{MYSQL_SLAVE_REP_USERNAME}}'@'10.%' IDENTIFIED BY '{{MYSQL_SLAVE_REP_PASSWORD}}';\""
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"GRANT REPLICATION SLAVE ON *.* TO '{{MYSQL_MASTER_REP_USERNAME}}'@'10.%' IDENTIFIED BY '{{MYSQL_MASTER_REP_PASSWORD}}';\""
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"flush privileges;\""
+  when: inventory_hostname in groups.mysql_master
+
+- hosts: mysql_master
+  name: Stop and reset slave on master2 server to enable Master-Master replication
+  shell: "{{item}}"
+  with_items:
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"stop slave;\""
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"reset slave;\""
+  when: inventory_hostname == groups.mysql_master[1] and {{hostvars[groups['mysql_master'][0]]['master1_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_master'][0]]['master1_last_io_error_status']['stdout']}} == 1
+
+- hosts: mysql_master
+  name: Create database on master2
+  shell: "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"create database {{item}};\""
+  with_items:
+    - "{{hostvars[groups['mysql_master'][0]]['master_1_databases']['stdout_lines']}}"
+  when: inventory_hostname == groups.mysql_master[1] and {{hostvars[groups['mysql_master'][0]]['master1_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_master'][0]]['master1_last_io_error_status']['stdout']}} == 1
+
+- hosts: mysql_master
+  name: Restore full database on master2 server to enable Master-Master replication
+  shell: "/usr/bin/mysql -u root -p'{{ROOT_PASSWORD}}' {{item}} < {{DUMP_PATH}}/{{item}}_dump.sql"
+  with_items:
+    - "{{hostvars[groups['mysql_master'][0]]['master_1_databases']['stdout_lines']}}"
+  when: inventory_hostname == groups.mysql_master[1] and {{hostvars[groups['mysql_master'][0]]['master1_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_master'][0]]['master1_last_io_error_status']['stdout']}} == 1
+
+- hosts: mysql_master
+  name: Change master postion on master1 server to enable Master-Master replication
+  shell: "{{item}}"
+  with_items:
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"CHANGE MASTER TO MASTER_HOST='{{groups.mysql_master[0]}}', MASTER_USER='{{MYSQL_MASTER_REP_USERNAME}}', MASTER_PASSWORD='{{MYSQL_MASTER_REP_PASSWORD}}', MASTER_LOG_FILE='{{hostvars[groups['mysql_master'][0]]['MASTER_ONE_FILE_NAME']}}', MASTER_LOG_POS={{hostvars[groups['mysql_master'][0]]['MASTER_ONE_FILE_POSITION']}};\""
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"START SLAVE;\""
+  when: inventory_hostname == groups.mysql_master[1] and {{hostvars[groups['mysql_master'][0]]['master1_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_master'][0]]['master1_last_io_error_status']['stdout']}} == 1
+
+- hosts: mysql_master
+  name: get master 2 status
+  mysql_replication:
+    mode: getmaster
+    login_user: root
+    login_password: "{{ROOT_PASSWORD}}"
+  register: master_two_status
+  when: inventory_hostname == groups.mysql_master[1] and {{hostvars[groups['mysql_master'][0]]['master1_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_master'][0]]['master1_last_io_error_status']['stdout']}} == 1
+
+- hosts: mysql_master
+  name: set facts for master 1 file name
+  set_fact:
+    MASTER_TWO_FILE_NAME: "{{master_two_status.File}}"
+  when: inventory_hostname == groups.mysql_master[1] and {{hostvars[groups['mysql_master'][0]]['master1_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_master'][0]]['master1_last_io_error_status']['stdout']}} == 1
+
+- hosts: mysql_master
+  name: set facts for master 1 position
+  set_fact:
+    MASTER_TWO_FILE_POSITION: "{{master_two_status.Position}}"
+  when: inventory_hostname == groups.mysql_master[1] and {{hostvars[groups['mysql_master'][0]]['master1_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_master'][0]]['master1_last_io_error_status']['stdout']}} == 1
+
+- hosts: mysql_master
+  name: Change master position on master 1 server to enable bi-directional master-master replication
+  shell: "{{item}}"
+  with_items:
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"stop slave;\""
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"reset slave;\""
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"CHANGE MASTER TO MASTER_HOST='{{groups.mysql_master[0]}}', MASTER_USER='{{MYSQL_MASTER_REP_USERNAME}}', MASTER_PASSWORD='{{MYSQL_MASTER_REP_PASSWORD}}', MASTER_LOG_FILE='{{hostvars[groups['mysql_master'][0]]['MASTER_TWO_FILE_NAME']}}', MASTER_LOG_POS={{hostvars[groups['mysql_master'][0]]['MASTER_TWO_FILE_POSITION']}};\""
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"START SLAVE;\""
+  when: inventory_hostname == groups.mysql_master[0] and {{master1_slave_io_status.stdout}} == 0 and {{master1_last_io_error_status.stdout}} == 1
+
+- hosts: mysql_master
+  name: "Delete dump files from master servers"
+  shell: "rm -rf {{DUMP_PATH}}/*.sql"
+  when: inventory_hostname in groups.mysql_master
+
+- hosts: mysql_master
+  name: lock tables
+  shell: "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"FLUSH TABLES WITH READ LOCK;\""
+  when: inventory_hostname == groups.mysql_master[1] and {{hostvars[groups['mysql_master'][0]]['master1_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_master'][0]]['master1_last_io_error_status']['stdout']}} == 1
+
+- name: get master status
+  mysql_replication:
+    mode: getmaster
+    login_user: root
+    login_password: "{{ROOT_PASSWORD}}"
+  register: master_two_status_replication
+  when: inventory_hostname == groups.mysql_master[1] and {{hostvars[groups['mysql_master'][0]]['master1_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_master'][0]]['master1_last_io_error_status']['stdout']}} == 1
+
+- hosts: mysql_master
+  name: set facts for master file name
+  set_fact:
+    MASTER_1_SLAVE_FILE: "{{master_two_status_replication.File}}"
+  when: inventory_hostname == groups.mysql_master[1] and {{hostvars[groups['mysql_master'][0]]['master1_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_master'][0]]['master1_last_io_error_status']['stdout']}} == 1
+
+- hosts: mysql_master
+  name: set facts for master position
+  set_fact:
+    MASTER_1_SLAVE_POSITION: "{{master_two_status_replication.Position}}"
+  when: inventory_hostname == groups.mysql_master[1] and {{hostvars[groups['mysql_master'][0]]['master1_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_master'][0]]['master1_last_io_error_status']['stdout']}} == 1
+
+- hosts: mysql_master
+  name: Take dump from master server
+  shell: /usr/bin/mysqldump -u root -p'{{ROOT_PASSWORD}}' -q -c --lock-all-tables {{item}} > {{DUMP_PATH}}/{{item}}_dump.sql
+  with_items:
+    - "{{hostvars[groups['mysql_master'][0]]['master_1_databases']['stdout_lines']}}"
+  when: inventory_hostname == groups.mysql_master[1] and {{hostvars[groups['mysql_master'][0]]['master1_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_master'][0]]['master1_last_io_error_status']['stdout']}} == 1
+
+- hosts: mysql_master
+  name: unlock tables
+  shell: "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"unlock tables;\""
+  when: inventory_hostname == groups.mysql_master[1] and {{hostvars[groups['mysql_master'][0]]['master1_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_master'][0]]['master1_last_io_error_status']['stdout']}} == 1
+
+- hosts: mysql_master
+  name: scp dump file
+  shell: scp -i {{PEM_KEY}} -o StrictHostKeyChecking=no {{DUMP_PATH}}/*.sql ec2-user@{{item}}:{{DUMP_PATH}}
+  with_items:
+    - "{{groups.mysql_slave[1]}}"
+  when: inventory_hostname == groups.mysql_master[1] and {{hostvars[groups['mysql_master'][0]]['master1_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_master'][0]]['master1_last_io_error_status']['stdout']}} == 1
+
+- hosts: mysql_slave
+  name: Stop and reset slave to enable slave replication
+  shell: "{{item}}"
+  with_items:
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"stop slave;\""
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"reset slave;\""
+  when: inventory_hostname == groups.mysql_slave[1] and {{hostvars[groups['mysql_master'][0]]['master1_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_master'][0]]['master1_last_io_error_status']['stdout']}} == 1
+
+- hosts: mysql_slave
+  name: Drop database on slave2
+  shell: "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"drop database {{item}};\""
+  with_items:
+    - "{{hostvars[groups['mysql_master'][0]]['master_1_databases']['stdout_lines']}}"
+  when: inventory_hostname == groups.mysql_slave[1] and {{hostvars[groups['mysql_master'][0]]['master1_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_master'][0]]['master1_last_io_error_status']['stdout']}} == 1
+
+- hosts: mysql_slave
+  name: Create database on slave2
+  shell: "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"create database {{item}};\""
+  with_items:
+    - "{{hostvars[groups['mysql_master'][0]]['master_1_databases']['stdout_lines']}}"
+  when: inventory_hostname == groups.mysql_slave[1] and {{hostvars[groups['mysql_master'][0]]['master1_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_master'][0]]['master1_last_io_error_status']['stdout']}} == 1
+
+- hosts: mysql_slave
+  name: Restore full database on slave2 server to enable Master-Slave replication
+  shell: "/usr/bin/mysql -u root -p'{{ROOT_PASSWORD}}' {{item}} < {{DUMP_PATH}}/{{item}}_dump.sql"
+  with_items:
+    - "{{hostvars[groups['mysql_master'][0]]['master_1_databases']['stdout_lines']}}"
+  when: inventory_hostname == groups.mysql_slave[1] and {{hostvars[groups['mysql_master'][0]]['master1_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_master'][0]]['master1_last_io_error_status']['stdout']}} == 1
+
+- hosts: mysql_slave
+  name: Change master postion on slave2 server to enable Master-Slave replication
+  shell: "{{item}}"
+  with_items:
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"CHANGE MASTER TO MASTER_HOST='{{groups.mysql_master[1]}}', MASTER_USER='{{MYSQL_SLAVE_REP_USERNAME}}', MASTER_PASSWORD='{{MYSQL_SLAVE_REP_PASSWORD}}', MASTER_LOG_FILE='{{hostvars[groups['mysql_master'][1]]['MASTER_1_SLAVE_FILE']}}', MASTER_LOG_POS={{hostvars[groups['mysql_master'][1]]['MASTER_1_SLAVE_POSITION']}};\""
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"START SLAVE;\""
+  when: inventory_hostname == groups.mysql_slave[1] and {{hostvars[groups['mysql_master'][0]]['master1_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_master'][0]]['master1_last_io_error_status']['stdout']}} == 1
+
+- hosts: mysql*
+  name: "Delete dump files from master servers"
+  shell: "rm -rf {{DUMP_PATH}}/*.sql"
+#  when: inventory_hostname in groups.mysql_master
+
+### Slave 2 replication failure
+- hosts: mysql_slave
+  name: Check Master1-Slave1 replication Slave_IO_Running status on Slave2
+  shell: mysql -u root -p'{{ROOT_PASSWORD}}' -e "show slave status\G" | grep 'Slave_IO_Running' | grep 'Yes' | wc -l executable=/bin/bash
+  register: slave2_slave_io_status
+  when: inventory_hostname == groups.mysql_slave[1]
+
+- hosts: mysql_slave
+  name: Check Master1-Slave1 replication Slave_SQL_Running status on Slave2
+  shell: mysql -u root -p'{{ROOT_PASSWORD}}' -e "show slave status\G" | grep 'Slave_SQL_Running' | grep 'Yes' | wc -l executable=/bin/bash
+  register: slave2_slave_sql_running_status
+  when: inventory_hostname == groups.mysql_slave[1]
+
+- hosts: mysql_master
+  name: Get the databases available in Master2
+  shell: mysql -u root -p'{{ROOT_PASSWORD}}' -e "show databases;" | grep -v 'information_schema\|mysql\|Database\|performance_schema\|sys'
+  register: master_2_databases
+  when: inventory_hostname == groups.mysql_master[1]
+
+- hosts: mysql_master
+  name: lock tables
+  shell: "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"FLUSH TABLES WITH READ LOCK;\""
+  when: inventory_hostname == groups.mysql_master[1] and {{hostvars[groups['mysql_slave'][1]]['slave2_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_slave'][1]]['slave2_slave_sql_running_status']['stdout']}} == 0
+
+- hosts: mysql_master
+  name: get master status from master 2
+  mysql_replication:
+    mode: getmaster
+    login_user: root
+    login_password: "{{ROOT_PASSWORD}}"
+  register: master_2_master_status
+  when: inventory_hostname == groups.mysql_master[1] and {{hostvars[groups['mysql_slave'][1]]['slave2_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_slave'][1]]['slave2_slave_sql_running_status']['stdout']}} == 0
+
+- hosts: mysql_master
+  name: set facts for master 2 file name
+  set_fact:
+    MASTER_TWO_SLAVE_FILE: "{{master_2_master_status.File}}"
+  when: inventory_hostname == groups.mysql_master[1] and {{hostvars[groups['mysql_slave'][1]]['slave2_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_slave'][1]]['slave2_slave_sql_running_status']['stdout']}} == 0
+
+- hosts: mysql_master
+  name: set facts for master 2 position
+  set_fact:
+    MASTER_TWO_SLAVE_POSITION: "{{master_2_master_status.Position}}"
+  when: inventory_hostname == groups.mysql_master[1] and {{hostvars[groups['mysql_slave'][1]]['slave2_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_slave'][1]]['slave2_slave_sql_running_status']['stdout']}} == 0
+
+- hosts: mysql_master
+  name: Take full dump from master2 server
+  shell: /usr/bin/mysqldump -u root -p'{{ROOT_PASSWORD}}' -q -c --lock-all-tables {{item}} > {{DUMP_PATH}}/{{item}}_dump.sql
+  with_items:
+    - "{{master_2_databases.stdout_lines}}"
+  when: inventory_hostname == groups.mysql_master[1] and {{hostvars[groups['mysql_slave'][1]]['slave2_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_slave'][1]]['slave2_slave_sql_running_status']['stdout']}} == 0
+
+- hosts: mysql_master
+  name: unlock tables on master2
+  shell: "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"unlock tables;\""
+  when: inventory_hostname == groups.mysql_master[1] and {{hostvars[groups['mysql_slave'][1]]['slave2_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_slave'][1]]['slave2_slave_sql_running_status']['stdout']}} == 0
+
+- hosts: mysql_master
+  name: scp dump file
+  shell: scp -i {{PEM_KEY}} -o StrictHostKeyChecking=no {{DUMP_PATH}}/*.sql ec2-user@{{item}}:{{DUMP_PATH}}
+  with_items:
+    - "{{groups.mysql_slave[1]}}"
+  when: inventory_hostname == groups.mysql_master[1] and {{hostvars[groups['mysql_slave'][1]]['slave2_slave_io_status']['stdout']}} == 0 and {{hostvars[groups['mysql_slave'][1]]['slave2_slave_sql_running_status']['stdout']}} == 0
+
+- hosts: mysql_slave
+  name: Stop and reset slave to enable slave replication
+  shell: "{{item}}"
+  with_items:
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"stop slave;\""
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"reset slave;\""
+  when: inventory_hostname == groups.mysql_slave[1] and {{slave2_slave_io_status.stdout}} == 0 and {{slave2_slave_sql_running_status.stdout}} == 0
+
+- hosts: mysql_slave
+  name: Drop database on slave2
+  shell: "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"drop database {{item}};\""
+  with_items:
+    - "{{hostvars[groups['mysql_master'][1]]['master_2_databases']['stdout_lines']}}"
+  when: inventory_hostname == groups.mysql_slave[1] and {{slave2_slave_io_status.stdout}} == 0 and {{slave2_slave_sql_running_status.stdout}} == 0
+
+- hosts: mysql_slave
+  name: Create database on slave2
+  shell: "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"create database {{item}};\""
+  with_items:
+    - "{{hostvars[groups['mysql_master'][1]]['master_2_databases']['stdout_lines']}}"
+  when: inventory_hostname == groups.mysql_slave[1] and {{slave2_slave_io_status.stdout}} == 0 and {{slave2_slave_sql_running_status.stdout}} == 0
+
+- hosts: mysql_slave
+  name: Restore full database on slave1 server to enable Master-Slave replication
+  shell: "/usr/bin/mysql -u root -p'{{ROOT_PASSWORD}}' {{item}} < {{DUMP_PATH}}/{{item}}_dump.sql"
+  with_items:
+    - "{{hostvars[groups['mysql_master'][1]]['master_2_databases']['stdout_lines']}}"
+  when: inventory_hostname == groups.mysql_slave[1] and {{slave2_slave_io_status.stdout}} == 0 and {{slave2_slave_sql_running_status.stdout}} == 0
+
+- hosts: mysql_slave
+  name: Change master postion on slave2 server to enable Master-slave replication
+  shell: "{{item}}"
+  with_items:
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"CHANGE MASTER TO MASTER_HOST='{{groups.mysql_master[1]}}', MASTER_USER='{{MYSQL_SLAVE_REP_USERNAME}}', MASTER_PASSWORD='{{MYSQL_SLAVE_REP_PASSWORD}}', MASTER_LOG_FILE='{{hostvars[groups['mysql_master'][1]]['MASTER_TWO_SLAVE_FILE']}}', MASTER_LOG_POS={{hostvars[groups['mysql_master'][1]]['MASTER_TWO_SLAVE_POSITION']}};\""
+    - "mysql -u root -p'{{ROOT_PASSWORD}}' -e \"START SLAVE;\""
+  when: inventory_hostname == groups.mysql_slave[1] and {{slave2_slave_io_status.stdout}} == 0 and {{slave2_slave_sql_running_status.stdout}} == 0
+
+- hosts: mysql*
+  name: "Delete dump files from master servers"
+  shell: "rm -rf {{DUMP_PATH}}/*.sql"
+#  when: inventory_hostname in groups.mysql_master

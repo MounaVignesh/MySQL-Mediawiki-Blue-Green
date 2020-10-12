@@ -1,0 +1,85 @@
+ANSIBLE_HOMEPATH: "/etc/ansible/mysql/"
+
+###REGION
+REGION: us-west-2
+REGION_DR: us-east-1
+
+###AMI_ID
+AMI_ID: "ami-123456789"
+AMI_ID_DR: "ami-abc123456"
+
+INSTANCE_TYPE_MASTER: "t2.micro"
+INSTANCE_TYPE_SLAVE: "t2.micro"
+
+
+KEY_NAME: "ABC-key"
+KEY_NAME_DR: "XYZ-key"
+
+IAM_ROLE_NAME: "automation_role"
+
+SECURITY_GROUP_1: "sg-123456"
+SECURITY_GROUP_2: "sg-456123"
+
+SUBNET_1: "subnet-abc123"
+SUBNET_2: "subnet-xyz124"
+
+iface: '{{ ansible_default_ipv4.interface }}'
+
+
+INSTANCES:
+  - SECTION: mysql_master
+    KEY_NAME_IN: "{{ KEY_NAME }}"
+    SECURITY_GROUP_IN: "{{ SECURITY_GROUP_2 }}"
+    INSTANCE_TYPE_IN: "{{ INSTANCE_TYPE_MASTER }}"
+    IMAGE_IN: "{{ AMI_ID_DR }}"
+    SUBNET_ID_IN: "{{ SUBNET_2 }}"
+    REGION_IN: "{{ REGION_DR }}"
+    INSTANCES_NAME: tst-mylmast2
+  - SECTION: mysql_master
+    KEY_NAME_IN: "{{ KEY_NAME }}"
+    SECURITY_GROUP_IN: "{{ SECURITY_GROUP_1 }}"
+    INSTANCE_TYPE_IN: "{{ INSTANCE_TYPE_MASTER }}"
+    IMAGE_IN: "{{ AMI_ID }}"
+    SUBNET_ID_IN: "{{ SUBNET_1 }}"
+    REGION_IN: "{{ REGION }}"
+    INSTANCES_NAME: tst-mylmast1
+  - SECTION: mysql_slave
+    KEY_NAME_IN: "{{ KEY_NAME }}"
+    SECURITY_GROUP_IN: "{{ SECURITY_GROUP_2 }}"
+    INSTANCE_TYPE_IN: "{{ INSTANCE_TYPE_SLAVE }}"
+    IMAGE_IN: "{{ AMI_ID_DR }}"
+    SUBNET_ID_IN: "{{ SUBNET_2 }}"
+    REGION_IN: "{{ REGION_DR }}"
+    INSTANCES_NAME: tst-mylslave2
+  - SECTION: mysql_slave
+    KEY_NAME_IN: "{{ KEY_NAME }}"
+    SECURITY_GROUP_IN: "{{ SECURITY_GROUP_1 }}"
+    INSTANCE_TYPE_IN: "{{ INSTANCE_TYPE_SLAVE }}"
+    IMAGE_IN: "{{ AMI_ID }}"
+    SUBNET_ID_IN: "{{ SUBNET_1 }}"
+    REGION_IN: "{{ REGION }}"
+    INSTANCES_NAME: tst-mylslave1
+
+### Mysql configuration:
+MYSQL_PATH: "/mnt/data-store-a"
+MYSQL_PACKAGE_NAME: "mysql57-community-release-el7-9.noarch"
+MYSQL_DOWNLOAD: "https://dev.mysql.com/get/{{MYSQL_PACKAGE_NAME}}.rpm"
+MYSQL_RPM_FILE: "{{MYSQL_PACKAGE_NAME}}.rpm"
+MYSQL_CONF_FILE_LOCAL_PATH: "/etc/ansible/mysql/roles/configure_mysql/files"
+MYSQL_CONF_PATH: "/etc"
+ROOT_PASSWORD: "r00Tp@55w0Rd"
+DUMP_PATH: "/mnt/data-store-b"
+MYSQL_SYMLINK_PATH: "/mnt/data-store-a"
+PEM_KEY: "/home/ec2-user/abcpoc.pem"
+#INITIAL_MASTER_FILE:
+#MASTER_STATUS:
+#  - INITIAL_MASTER_FILE_NAME: "{{INITIAL_MASTER_FILE}}"
+#INITIAL_MASTER_POSITION:
+MYSQL_SLAVE_REP_USERNAME: sluser
+MYSQL_SLAVE_REP_PASSWORD: S1@passwd
+MYSQL_MASTER_REP_USERNAME: msuser
+MYSQL_MASTER_REP_PASSWORD: M5@passwd
+
+###MediaWiki
+WIKI_VERSION= "1.35"
+WIKI_PACKAGE= "mediawiki-1.35.0"

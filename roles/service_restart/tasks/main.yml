@@ -1,0 +1,21 @@
+- hosts: mysql_*
+  name: check mysqld status
+  shell: service mysqld status | grep 'active (running)' | wc -l
+  ignore_errors: yes
+  register: status_mysqld
+
+- debug: "msg='results: {{ status_mysqld.stdout }}'"
+  when: inventory_hostname in groups['mysql_master']
+
+- debug: "msg='results: {{ status_mysqld.stdout }}'"
+  when: inventory_hostname in groups['mysql_slave']
+
+- hosts: mysql_master
+  name: start mysqld service if not running
+  shell: service mysqld start
+  when: inventory_hostname in groups['mysql_master'] and {{ status_mysqld.stdout }} == 0
+
+- hosts: mysql_slave
+  name: start mysqld service if not running
+  shell: service mysqld start
+  when: inventory_hostname in groups['mysql_slave'] and {{ status_mysqld.stdout }} == 0
