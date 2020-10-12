@@ -16,13 +16,15 @@ Configuration:
 	b) configure_mysql.yml - Configure MySQL in all 4 servers - This configuration would be Master-Slave Seup.
 	c) configure_mysql.yml - This will install mediawiki and setup.
 	
-2) initial_data_sync_for_replication.sh	
+2) initial_data_sync_for_replication.sh	 - This shell script will do Master-Master replication and Master2-Slave2 replication.
 	a) initial_data_insert_master.yml - This playbook will do Enable replication between Master-Master and Master-Slave.
 	b) Master-Slave setup for both regions - Sample data insert and enable multi-region replication.
+	
+3) initial_data_insert_master.yml - This playbook will do Final master-slave replication.
 
-3) service_restart.yml - This will restart MySQL Services if needed we can use for all servers restart.
+4) service_restart.yml - This will restart MySQL Services if needed we can use for all servers restart.
 
-4) dr_mysql_failover.sh - This script and playbook will do any failover happens.
+5) dr_mysql_failover.sh - This script and playbook will do any failover happens.
    If any one of the server like master or slave will failed during AWS maintance or any status failed. This script will replace the server without any data loss.
    This playbook will replace the failed server without data loss and downtime.
 	
@@ -30,6 +32,7 @@ Steps:
 
 1. Run the setup.sh shell script to create EC2 instances and setup MySQL and Apache in 4 servers.
 2. initial_data_sync_for_replication.sh - Enable replication between Master-Master and Master-Slave (This will insert sample data)
+3. initial_data_insert_master.yml - This playbook will do Final master-slave replication.
 
 After above steps completed. You can login all 4 servers and verified the MySQL Master-Master and Master-Slave Replication with deleting and inserting any sample data.
 
